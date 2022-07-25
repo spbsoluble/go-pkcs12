@@ -17,7 +17,7 @@ import (
 	"errors"
 	"hash"
 
-	"github.com/spbsoluble/src/go-pkcs12/internal/rc2"
+	"github.com/spbsoluble/go-pkcs12/internal/rc2"
 	"golang.org/x/crypto/pbkdf2"
 )
 

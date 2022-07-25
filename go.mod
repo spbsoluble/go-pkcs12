@@ -1,4 +1,4 @@
-module github.com/spbsoluble/src/go-pkcs12
+module github.com/spbsoluble/go-pkcs12
 
 go 1.15
 
