@@ -275,6 +275,7 @@ func DecodeChain(pfxData []byte, password string) (privateKey interface{}, certi
 	}
 
 	bagLen := len(bags)
+
 	for i, bag := range bags {
 		switch {
 		case bag.Id.Equal(oidCertBag):
@@ -290,10 +291,22 @@ func DecodeChain(pfxData []byte, password string) (privateKey interface{}, certi
 				err = errors.New("pkcs12: expected exactly one certificate in the certBag")
 				return nil, nil, nil, err
 			}
-			if (certificate == nil && i == bagLen-1) || (certificate == nil && bagLen <= 2) { //assumes last cert in bag is the leaf cert or if there is only 1 cert in the bag assume it's the leaf cert
-				certificate = certs[0]
+			//if bags length is 2 then assume that 0 is the leaf cert and 1 is the CA cert
+			//if bags length is > 2 then assume 0 is the pkey, 1 is the leaf cert and 2+ are the CA certs
+			if bagLen == 2 {
+				if i == 0 {
+					caCerts = append(caCerts, certs[0])
+				} else {
+					certificate = certs[0]
+				}
 			} else {
-				caCerts = append(caCerts, certs[0])
+				if i == 0 {
+					privateKey = certs[0]
+				} else if i == 1 {
+					certificate = certs[0]
+				} else {
+					caCerts = append(caCerts, certs[0])
+				}
 			}
 
 		case bag.Id.Equal(oidPKCS8ShroundedKeyBag):
