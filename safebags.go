@@ -7,9 +7,11 @@ package pkcs12
 
 import (
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/asn1"
 	"errors"
 	"io"
+	"strings"
 )
 
 var (
@@ -18,6 +20,15 @@ var (
 	oidPKCS8ShroundedKeyBag    = asn1.ObjectIdentifier([]int{1, 2, 840, 113549, 1, 12, 10, 1, 2})
 	oidCertBag                 = asn1.ObjectIdentifier([]int{1, 2, 840, 113549, 1, 12, 10, 1, 3})
 )
+
+// OpaquePrivateKey holds the raw PKCS#8 DER bytes for a private key whose
+// algorithm OID is not supported by Go's crypto/x509 package (e.g. Ed448,
+// OID 1.3.101.113). Callers can wrap DER directly in a "PRIVATE KEY" PEM
+// block without needing to parse the key material.
+type OpaquePrivateKey struct {
+	AlgorithmOID asn1.ObjectIdentifier
+	DER          []byte
+}
 
 type certBag struct {
 	Id   asn1.ObjectIdentifier
@@ -41,6 +52,16 @@ func decodePkcs8ShroudedKeyBag(asn1Data, password []byte) (privateKey interface{
 	}
 
 	if privateKey, err = x509.ParsePKCS8PrivateKey(pkData); err != nil {
+		if strings.Contains(err.Error(), "unknown algorithm") {
+			// The OID is not known to Go's x509 package (e.g. Ed448, OID 1.3.101.113).
+			// Preserve the raw PKCS#8 DER so callers can encode it as PEM without parsing.
+			var pkcs8Hdr struct {
+				Version   int
+				Algorithm pkix.AlgorithmIdentifier
+			}
+			asn1.Unmarshal(pkData, &pkcs8Hdr) // best-effort; ignore error
+			return &OpaquePrivateKey{AlgorithmOID: pkcs8Hdr.Algorithm.Algorithm, DER: pkData}, nil
+		}
 		return nil, errors.New("pkcs12: error parsing PKCS#8 private key: " + err.Error())
 	}
 
