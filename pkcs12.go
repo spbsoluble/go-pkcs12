@@ -18,6 +18,7 @@
 package pkcs12 // import "github.com/spbsoluble/go-pkcs12"
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/rsa"
 	"crypto/sha1"
@@ -260,9 +261,10 @@ func Decode(pfxData []byte, password string) (privateKey interface{}, certificat
 
 // DecodeChain extracts a certificate, a CA certificate chain, and private key
 // from pfxData, which must be a DER-encoded PKCS#12 file. This function assumes that there is at least one certificate
-// and only one private key in the pfxData.  The last certificate is assumed to
-// be the leaf certificate, and all preceding certificates, if any, are assumed to
-// comprise the CA certificate chain.
+// and only one private key in the pfxData.  The leaf certificate is identified
+// by matching the localKeyID attribute of the certificate bag with that of the
+// key bag.  If no localKeyID match is found, the last certificate in the file is
+// used as the leaf.  All other certificates are returned as the CA chain.
 func DecodeChain(pfxData []byte, password string) (privateKey interface{}, certificate *x509.Certificate, caCerts []*x509.Certificate, err error) {
 	encodedPassword, err := bmpStringZeroTerminated(password)
 	if err != nil {
@@ -274,9 +276,15 @@ func DecodeChain(pfxData []byte, password string) (privateKey interface{}, certi
 		return nil, nil, nil, err
 	}
 
-	bagLen := len(bags)
+	type certEntry struct {
+		cert *x509.Certificate
+		bag  safeBag
+	}
+	var allCerts []certEntry
+	var keyBag *safeBag
 
-	for i, bag := range bags {
+	for i := range bags {
+		bag := &bags[i]
 		switch {
 		case bag.Id.Equal(oidCertBag):
 			certsData, err := decodeCertBag(bag.Value.Bytes)
@@ -288,47 +296,69 @@ func DecodeChain(pfxData []byte, password string) (privateKey interface{}, certi
 				return nil, nil, nil, err
 			}
 			if len(certs) != 1 {
-				err = errors.New("pkcs12: expected exactly one certificate in the certBag")
-				return nil, nil, nil, err
+				return nil, nil, nil, errors.New("pkcs12: expected exactly one certificate in the certBag")
 			}
-			//if bags length is 2 then assume that 0 is the leaf cert and 1 is the CA cert
-			//if bags length is > 2 then assume 0 is the pkey, 1 is the leaf cert and 2+ are the CA certs
-			if bagLen == 2 {
-				if i == 0 {
-					caCerts = append(caCerts, certs[0])
-				} else {
-					certificate = certs[0]
-				}
-			} else {
-				if i == 0 {
-					privateKey = certs[0]
-				} else if i == 1 {
-					certificate = certs[0]
-				} else {
-					caCerts = append(caCerts, certs[0])
-				}
-			}
+			allCerts = append(allCerts, certEntry{cert: certs[0], bag: *bag})
 
 		case bag.Id.Equal(oidPKCS8ShroundedKeyBag):
 			if privateKey != nil {
-				err = errors.New("pkcs12: expected exactly one key bag")
-				return nil, nil, nil, err
+				return nil, nil, nil, errors.New("pkcs12: expected exactly one key bag")
 			}
-
 			if privateKey, err = decodePkcs8ShroudedKeyBag(bag.Value.Bytes, encodedPassword); err != nil {
 				return nil, nil, nil, err
 			}
+			keyBag = bag
 		}
 	}
 
-	if certificate == nil {
+	if len(allCerts) == 0 {
 		return nil, nil, nil, errors.New("pkcs12: certificate missing")
 	}
 	if privateKey == nil {
 		return nil, nil, nil, errors.New("pkcs12: private key missing")
 	}
 
+	// Identify the leaf certificate using localKeyID matching.
+	// The key bag and its associated cert bag are expected to carry the same
+	// localKeyID (SHA-1 of the leaf cert, as set by Encode and most PKCS#12
+	// producers).  Fall back to the last cert when no match is found.
+	leafIdx := len(allCerts) - 1
+	if keyBag != nil && keyBag.hasAttribute(oidLocalKeyID) {
+		keyID := getLocalKeyID(keyBag)
+		for i := range allCerts {
+			if allCerts[i].bag.hasAttribute(oidLocalKeyID) {
+				certID := getLocalKeyID(&allCerts[i].bag)
+				if bytes.Equal(keyID, certID) {
+					leafIdx = i
+					break
+				}
+			}
+		}
+	}
+
+	for i, ce := range allCerts {
+		if i == leafIdx {
+			certificate = ce.cert
+		} else {
+			caCerts = append(caCerts, ce.cert)
+		}
+	}
+
 	return
+}
+
+// getLocalKeyID returns the raw bytes of the localKeyID attribute from a
+// safeBag, or nil if the attribute is absent or cannot be decoded.
+func getLocalKeyID(bag *safeBag) []byte {
+	for _, attr := range bag.Attributes {
+		if attr.Id.Equal(oidLocalKeyID) {
+			var id []byte
+			if unmarshal(attr.Value.Bytes, &id) == nil {
+				return id
+			}
+		}
+	}
+	return nil
 }
 
 // DecodeTrustStore extracts the certificates from pfxData, which must be a DER-encoded
