@@ -5,14 +5,87 @@
 package pkcs12
 
 import (
-	"crypto/rand"
+	"bytes"
+	cryptorand "crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/pem"
 	"testing"
 )
+
+// TestOpaquePrivateKey verifies that decodePkcs8ShroudedKeyBag returns an
+// *OpaquePrivateKey when the PKCS#8 payload uses an algorithm OID that Go's
+// crypto/x509 does not recognise.
+func TestOpaquePrivateKey(t *testing.T) {
+	// Use a private, non-standard OID that x509.ParsePKCS8PrivateKey will
+	// reject with an "unknown algorithm" error, exercising the fallback path
+	// that wraps the raw DER in OpaquePrivateKey.
+	unknownOID := asn1.ObjectIdentifier{1, 2, 3, 4, 5, 6, 7}
+
+	// Build a minimal PKCS#8 structure with the unknown OID.
+	type pkcs8Blob struct {
+		Version   int
+		Algorithm pkix.AlgorithmIdentifier
+		Key       []byte
+	}
+	rawPKCS8, err := asn1.Marshal(pkcs8Blob{
+		Version:   0,
+		Algorithm: pkix.AlgorithmIdentifier{Algorithm: unknownOID},
+		Key:       make([]byte, 32),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Encrypt the PKCS#8 blob into a shrouded key bag using the same scheme
+	// as encodePkcs8ShroudedKeyBag (3DES-PBE).
+	password, err := bmpStringZeroTerminated("testpassword")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	salt := make([]byte, 8)
+	if _, err = cryptorand.Read(salt); err != nil {
+		t.Fatal(err)
+	}
+	paramBytes, err := asn1.Marshal(pbeParams{Salt: salt, Iterations: 2048})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var pkinfo encryptedPrivateKeyInfo
+	pkinfo.AlgorithmIdentifier.Algorithm = oidPBEWithSHAAnd3KeyTripleDESCBC
+	pkinfo.AlgorithmIdentifier.Parameters.FullBytes = paramBytes
+	if err = pbEncrypt(&pkinfo, rawPKCS8, password); err != nil {
+		t.Fatal(err)
+	}
+
+	shroudedData, err := asn1.Marshal(pkinfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Decode and verify we get an *OpaquePrivateKey back.
+	key, err := decodePkcs8ShroudedKeyBag(shroudedData, password)
+	if err != nil {
+		t.Fatalf("decodePkcs8ShroudedKeyBag returned error: %v", err)
+	}
+
+	opaque, ok := key.(*OpaquePrivateKey)
+	if !ok {
+		t.Fatalf("expected *OpaquePrivateKey, got %T", key)
+	}
+	if !opaque.AlgorithmOID.Equal(unknownOID) {
+		t.Errorf("AlgorithmOID: got %v, want %v", opaque.AlgorithmOID, unknownOID)
+	}
+	if !bytes.Equal(opaque.DER, rawPKCS8) {
+		t.Error("OpaquePrivateKey.DER does not match original PKCS#8 bytes")
+	}
+}
 
 func TestPfx(t *testing.T) {
 	for commonName, base64P12 := range testdata {
@@ -71,7 +144,7 @@ func TestTrustStore(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		pfxData, err := EncodeTrustStore(rand.Reader, []*x509.Certificate{cert}, "password")
+		pfxData, err := EncodeTrustStore(cryptorand.Reader, []*x509.Certificate{cert}, "password")
 		if err != nil {
 			t.Fatal(err)
 		}
